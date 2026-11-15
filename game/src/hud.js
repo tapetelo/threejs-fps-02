@@ -47,9 +47,9 @@ export function createHud(world) {
       mm.fillStyle = '#ff3b30';
       mm.beginPath(); mm.arc(sx(state.bomb.x), sy(state.bomb.z), 4, 0, Math.PI * 2); mm.fill();
     }
-    // actors
+    // actors (hidden bots stay off the minimap in hero staging)
     for (const a of state.actors) {
-      if (!a.alive) continue;
+      if (!a.alive || a.hidden) continue;
       mm.fillStyle = a.team === 'ember' ? '#ff7a2f' : '#35c4b5';
       mm.beginPath(); mm.arc(sx(a.x), sy(a.z), a.isPlayer ? 4.5 : 3, 0, Math.PI * 2); mm.fill();
       if (a.isPlayer) {

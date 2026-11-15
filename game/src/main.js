@@ -15,7 +15,7 @@ import { buildWorld } from './world.js';
 import { createInput } from './input.js';
 import { ensureAudio, sfx } from './audio.js';
 import { eyePos, resolveShot, canFire, startReload, finishReload, applyRecoil, currentSpread, throwGrenade, updateGrenades, explosionDamage } from './weapons.js';
-import { stepMovement, wishFromYaw, dist2d } from './actors.js';
+import { stepMovement, wishFromYaw, dist2d, yawTo } from './actors.js';
 import { updateBot } from './bots.js';
 import { startMatch, tickRounds, onKill, plantBomb, defuseBomb, buyWeaponFor, buyGrenadeFor, setBanner } from './rounds.js';
 import { createEffects } from './effects.js';
@@ -62,14 +62,38 @@ function nameSprite(text, color) {
   return s;
 }
 
+function glowSprite(cssColor) {
+  // soft radial halo behind a bot so the figure reads as ONE character
+  // against the dusk yard, even at thumbnail size
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(64, 64, 4, 64, 64, 62);
+  grad.addColorStop(0, cssColor);
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = grad; g.fillRect(0, 0, 128, 128);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false,
+    blending: THREE.AdditiveBlending, opacity: 0.5,
+  }));
+  s.scale.set(3.4, 3.4, 1);
+  s.position.y = 1.15;
+  return s;
+}
+
 for (const a of state.actors) {
   if (a.isPlayer) continue;
-  const teamColor = a.team === 'ember' ? 0xff7a2f : 0x35c4b5;
+  // V2: the enemy must read as ONE clear character — bigger silhouette,
+  // bright team colour, strong emissive head + halo, full body visible.
+  const teamColor = a.team === 'ember' ? 0xff7a2f : 0x35e0cf;
   const g = new THREE.Group();
-  const bodyMat = new THREE.MeshStandardMaterial({ color: a.team === 'ember' ? 0x8a4a22 : 0x1f5a54, roughness: 0.8 });
+  const bodyMat = new THREE.MeshStandardMaterial({
+    color: a.team === 'ember' ? 0x4a2410 : 0x14302c, roughness: 0.75,
+    emissive: teamColor, emissiveIntensity: 0.15,
+  });
   const body = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.95, 0.36), bodyMat);
   body.position.y = 0.95;
-  const headMat = new THREE.MeshStandardMaterial({ color: teamColor, roughness: 0.5, emissive: teamColor, emissiveIntensity: 0.25 });
+  const headMat = new THREE.MeshStandardMaterial({ color: teamColor, roughness: 0.5, emissive: teamColor, emissiveIntensity: a.team === 'watch' ? 1.3 : 0.6 });
   const head = new THREE.Mesh(new THREE.SphereGeometry(0.21, 12, 10), headMat);
   head.position.y = 1.55;
   const visor = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.08, 0.05), new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.2, metalness: 0.6 }));
@@ -78,7 +102,9 @@ for (const a of state.actors) {
   gun.position.set(0.25, 1.15, 0.3);
   const sprite = nameSprite(a.name, a.team === 'ember' ? '#ffb27a' : '#7fe8dc');
   sprite.position.y = 2.05;
-  g.add(body, head, visor, gun, sprite);
+  sprite.scale.set(2.6, 0.65, 1);
+  const glow = glowSprite(a.team === 'ember' ? 'rgba(255,122,47,0.85)' : 'rgba(53,224,207,0.9)');
+  g.add(glow, body, head, visor, gun, sprite);
   scene.add(g);
   a.mesh = g; a.headMesh = head; a.gunMesh = gun; a.nameSprite = sprite;
   a.bodyMesh = body;
@@ -248,12 +274,59 @@ function showEnd() {
 }
 
 // ---------- screenshot presets ----------
+// V2 hero staging: exactly ONE enemy character, full figure, centred with
+// space around it, crosshair on the chest, gun in first-person view, clean
+// backdrop — the pattern every top-10 cover shows. All other bots are
+// hidden and frozen, so the one character holds its pose.
+function stageHero(px, pz, bx, bz, opts = {}) {
+  state.phase = 'live'; state.phaseT = 82;
+  state.banner = null;
+  hud.showBuy(false); hud.setPrompt('');
+  const d = Math.hypot(bx - px, bz - pz);
+  player.x = px; player.z = pz;
+  player.yaw = yawTo(px, pz, bx, bz);
+  player.pitch = Math.atan2(1.12 - CFG.eyeHeight, d); // crosshair on the chest
+  player.weapon = 'rifle'; player.mag = WEAPONS.rifle.mag; player.reserve = WEAPONS.rifle.reserveMax;
+  player.hp = 100;
+  state.bomb = { state: 'carried', carrierId: -1, site: null, x: 0, z: 0, fuse: 0, plantT: 0, defuseT: 0, defuserId: -1 };
+  const foe = state.actors.find((a) => a.team === 'watch');
+  for (const a of state.actors) {
+    if (a.isPlayer) continue;
+    if (a === foe) {
+      a.hidden = false; a.alive = true; a.hp = 100;
+      a.x = bx; a.z = bz; a.yaw = yawTo(bx, bz, px, pz); // faces the player
+      if (a.mesh) { a.mesh.rotation.z = 0; a.mesh.position.y = 0; }
+      if (a.nameSprite) a.nameSprite.visible = false; // no floating name in a hero shot
+    } else { a.hidden = true; a.alive = false; a.hp = 0; } // HUD counts + minimap read 1v1
+  }
+  // hide the floating A/B site letters so nothing competes with the character
+  if (world.siteA) world.siteA.visible = false;
+  if (world.siteB) world.siteB.visible = false;
+  state.freezeBots = true;
+  if (opts.plantedB) {
+    state.phase = 'planted'; state.phaseT = 27;
+    state.bomb = { state: 'planted', carrierId: player.id, site: 'B', x: 24, z: 15, fuse: 27, plantT: 0, defuseT: 0, defuserId: -1 };
+  }
+}
+
 function applyViewPreset() {
   if (!VIEW) return;
   ensureAudio();
   overlay.hidden = true;
   if (state.phase === 'menu') startMatch(state, world);
-  if (VIEW === 'spawn') {
+  if (VIEW === 'hero') {
+    // COVER: straight-on duel at the Foundry, furnace glow behind the bot
+    stageHero(20.9, -15, 23.5, -15);
+  } else if (VIEW === 'hero-mid') {
+    // mid-lane duel, open yard behind the bot
+    stageHero(4.9, 0, 7.5, 0);
+  } else if (VIEW === 'hero-b') {
+    // Crane Dock: one bot beside the planted charge, amber lamp behind
+    stageHero(18.9, 15, 21.5, 15, { plantedB: true });
+  } else if (VIEW === 'hero-a2') {
+    // Foundry from a diagonal: hazard ring + furnace, different angle
+    stageHero(19.9, -14.1, 22, -15.5);
+  } else if (VIEW === 'spawn') {
     player.x = -27; player.z = 0; player.yaw = -Math.PI / 2; player.pitch = 0.02;
     hud.showBuy(true); hud.buildBuyMenu(state, player, onBuyClick);
   } else if (VIEW === 'mid') {
@@ -364,8 +437,8 @@ function simStep(dt) {
   // grenades
   updateGrenades(state, dt, world.colliders, explodeGrenade);
 
-  // bots
-  if (state.phase === 'live' || state.phase === 'planted') {
+  // bots (frozen in hero staging so the one character holds its pose)
+  if ((state.phase === 'live' || state.phase === 'planted') && !state.freezeBots) {
     for (const a of state.actors) if (!a.isPlayer) updateBot(a, state, world, dt, botHooks);
   }
 
@@ -420,13 +493,14 @@ function syncRender(dt, now) {
   // bot meshes follow their actors
   for (const a of state.actors) {
     if (a.isPlayer || !a.mesh) continue;
+    if (a.hidden) { a.mesh.visible = false; continue; } // hero staging: one character only
     a.mesh.visible = true; // the fallen stay visible where they fell
     a.mesh.position.set(a.x, a.alive ? a.y : 0.3, a.z);
     if (!a.alive) continue;
     a.mesh.rotation.y = a.yaw + Math.PI;
     a.mesh.rotation.z = 0;
     const crouchScale = a.crouch ? 0.72 : 1;
-    a.mesh.scale.set(1, crouchScale, 1);
+    a.mesh.scale.set(1.22, 1.22 * crouchScale, 1.22); // V2: bigger, clearer silhouette
     if (a.nameSprite) a.nameSprite.material.opacity = 0.9;
   }
 
